@@ -13,7 +13,7 @@ Plan mode for [pi](https://pi.dev) — read-only codebase exploration with an in
 ## Install
 
 ```bash
-pi install git:github.com/username/pi-plan
+pi install git:github.com/EugeneKallis/pi-plan
 ```
 
 Or from npm (when published):
@@ -47,7 +47,7 @@ pi install npm:pi-plan
 ## Development
 
 ```bash
-git clone https://github.com/username/pi-plan
+git clone git@github.com:EugeneKallis/pi-plan
 cd pi-plan
 # Test locally
 pi -e ./extensions/plan-mode.ts
