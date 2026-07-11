@@ -32,6 +32,11 @@ import { Key } from "@earendil-works/pi-tui";
 const STATE_TYPE = "plan-state";
 const STATUS_KEY = "plan-mode";
 const BLOCKED_TOOLS = new Set(["edit", "write"]);
+const BLOCKED_BASH_PATTERNS = [
+	/\brm\b/, /\bmv\b/, /\bcp\b/, /\bmkdir\b/,
+	/\bnpm\b/, /\bpnpm\b/, /\byarn\b/, /\bpip\b/, /\bbrew\b/,
+	/\bgit\s+(commit|push|pull|merge|rebase|reset)\b/
+];
 
 const PLAN_SYSTEM_PROMPT = [
 	"",
@@ -88,7 +93,11 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function toggle(ctx: ExtensionContext) {
-		setMode(!active, ctx);
+		try {
+			setMode(!active, ctx);
+		} catch (err) {
+			console.error("[plan-mode] Failed to toggle:", err);
+		}
 	}
 
 	// -- Toggle command -------------------------------------------------------
@@ -122,27 +131,46 @@ export default function (pi: ExtensionAPI) {
 				reason: `Plan mode is active — \`${event.toolName}\` is blocked. Use \`read\` to read files, and \`bash\` for read-only commands (ls, grep, find). Run /plan to turn plan mode OFF to execute changes.`,
 			};
 		}
+		// Block bash commands that mutate the filesystem or run package managers
+		if (event.toolName === "bash") {
+			const cmd = (event.args as Record<string, unknown>)?.command;
+			if (typeof cmd === "string" && BLOCKED_BASH_PATTERNS.some(p => p.test(cmd))) {
+				return {
+					block: true,
+					reason: `Plan mode is active — mutating command blocked: \`${cmd.slice(0, 80)}\`. Run /plan to turn plan mode OFF to execute changes.`,
+				};
+			}
+		}
 	});
 
 	// -- Restore persisted state on startup/reload/resume/fork ----------------
 	pi.on("session_start", async (_event, ctx) => {
-		active = false; // default for a fresh session
-		const entries = ctx.sessionManager.getEntries();
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const e = entries[i] as { type: string; customType?: string; data?: unknown };
-			if (e.type === "custom" && e.customType === STATE_TYPE) {
-				const data = e.data as PlanState | undefined;
-				if (data && typeof data.active === "boolean") {
-					active = data.active;
+		try {
+			active = false; // default for a fresh session
+			const entries = ctx.sessionManager.getEntries();
+			for (let i = entries.length - 1; i >= 0; i--) {
+				const e = entries[i] as { type: string; customType?: string; data?: unknown };
+				if (e.type === "custom" && e.customType === STATE_TYPE) {
+					const data = e.data as PlanState | undefined;
+					if (data && typeof data.active === "boolean") {
+						active = data.active;
+					}
+					break;
 				}
-				break;
 			}
+		} catch (err) {
+			console.error("[plan-mode] Failed to restore state:", err);
+			active = false;
 		}
 		setStatus(ctx);
 	});
 
 	// -- Keep persisted state fresh on each turn -----------------------------
+	let lastPersisted = false;
 	pi.on("turn_start", async () => {
-		pi.appendEntry(STATE_TYPE, { active } satisfies PlanState);
+		if (active !== lastPersisted) {
+			pi.appendEntry(STATE_TYPE, { active } satisfies PlanState);
+			lastPersisted = active;
+		}
 	});
 }
