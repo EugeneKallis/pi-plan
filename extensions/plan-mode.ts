@@ -138,10 +138,12 @@ export default function (pi: ExtensionAPI) {
 	let active = false;
 	let codeModel: ModelSlot | null = null;   // model to restore when leaving plan mode
 	let planModel: ModelSlot | null = null;   // model to use during plan mode
+	let modelSwitched = false;               // true only when the model switch actually succeeded
 
 	function setStatus(ctx: ExtensionContext) {
 		if (active) {
-			const planTag = planModel ? ` [${planModel.id}]` : "";
+			// Only show model tag if the switch actually succeeded
+			const planTag = modelSwitched && planModel ? ` [${planModel.id}]` : "";
 			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("warning", `⊕ plan${planTag}`));
 		} else {
 			ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -167,6 +169,33 @@ export default function (pi: ExtensionAPI) {
 		return slot ? `${slot.provider}/${slot.id}` : "<none>";
 	}
 
+	async function ensureModel(ctx: ExtensionContext): Promise<boolean> {
+		// Verify the currently active model matches what we expect
+		if (!planModel) { return true; }
+		const current = modelSlotFromModel(ctx);
+		const currentKey = modelSlotKey(current);
+		const planKey = modelSlotKey(planModel);
+		if (currentKey === planKey) {
+			modelSwitched = true;
+			return true;
+		}
+		// Drift detected — re-switch
+		const ok = await switchToModelSlot(planModel, ctx, pi);
+		modelSwitched = ok;
+		if (ok) {
+			ctx.ui.notify(
+				`[plan-mode] Model re-switched to ${planKey}`,
+				"info",
+			);
+		} else {
+			ctx.ui.notify(
+				`[plan-mode] Failed to switch to plan model ${planKey} — using current model instead`,
+				"error",
+			);
+		}
+		return ok;
+	}
+
 	async function toggle(ctx: ExtensionContext) {
 		try {
 			if (active) {
@@ -185,6 +214,11 @@ export default function (pi: ExtensionAPI) {
 							`[plan-mode] Switched back to ${formatModelId(codeModel)}`,
 							"info",
 						);
+					} else {
+						ctx.ui.notify(
+							`[plan-mode] Failed to restore ${formatModelId(codeModel)} — staying on current model`,
+							"error",
+						);
 					}
 				}
 			} else {
@@ -194,12 +228,21 @@ export default function (pi: ExtensionAPI) {
 				// Switch to plan model if configured
 				if (planModel) {
 					const switched = await switchToModelSlot(planModel, ctx, pi);
+					modelSwitched = switched;
 					if (switched) {
 						ctx.ui.notify(
 							`[plan-mode] Switched to ${formatModelId(planModel)}`,
 							"info",
 						);
+					} else {
+						ctx.ui.notify(
+							`[plan-mode] Failed to switch to ${formatModelId(planModel)} — plan mode active but using current model`,
+							"error",
+						);
 					}
+				} else {
+					// No plan model configured — just use current model
+					modelSwitched = false;
 				}
 			}
 			setMode(!active, ctx);
@@ -479,7 +522,14 @@ export default function (pi: ExtensionAPI) {
 
 			// If restoring into plan mode, switch to plan model
 			if (active && planModel) {
-				await switchToModelSlot(planModel, ctx, pi);
+				const ok = await switchToModelSlot(planModel, ctx, pi);
+				modelSwitched = ok;
+				if (!ok) {
+					ctx.ui.notify(
+						`[plan-mode] Failed to switch to ${formatModelId(planModel)} on session restore`,
+						"error",
+					);
+				}
 			}
 		} catch (err) {
 			console.error("[plan-mode] Failed to restore state:", err);
@@ -490,9 +540,13 @@ export default function (pi: ExtensionAPI) {
 		setStatus(ctx);
 	});
 
-	// -- Keep persisted state fresh on each turn -----------------------------
+	// -- Keep persisted state fresh on each turn + verify model ---------------
 	let lastPersisted: { active: boolean; codeModel: string | null; planModel: string | null } | null = null;
-	pi.on("turn_start", async () => {
+	pi.on("turn_start", async (_event, ctx) => {
+		// Verify model is correct every turn — re-switch if it drifted
+		if (active && planModel && !modelSwitched) {
+			await ensureModel(ctx);
+		}
 		const key = {
 			active,
 			codeModel: modelSlotKey(codeModel),
