@@ -19,12 +19,6 @@ Plan mode for [pi](https://pi.dev) — read-only codebase exploration with an in
 pi install git:github.com/EugeneKallis/pi-plan
 ```
 
-Or from npm (when published):
-
-```bash
-pi install npm:pi-plan
-```
-
 ## Usage
 
 1. Run `/plan` to enter plan mode
