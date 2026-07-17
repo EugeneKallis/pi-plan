@@ -95,7 +95,7 @@ function modelSlotKey(slot: ModelSlot | null): string | null {
 	return slot ? `${slot.provider}/${slot.id}` : null;
 }
 
-async function switchToModelSlot(slot: ModelSlot | null, ctx: ExtensionContext): Promise<boolean> {
+async function switchToModelSlot(slot: ModelSlot | null, ctx: ExtensionContext, api: ExtensionAPI): Promise<boolean> {
 	if (!slot) return false;
 	const model = ctx.modelRegistry.find(slot.provider, slot.id);
 	if (!model) {
@@ -105,7 +105,7 @@ async function switchToModelSlot(slot: ModelSlot | null, ctx: ExtensionContext):
 		);
 		return false;
 	}
-	const ok = await pi.setModel(model);
+	const ok = await api.setModel(model);
 	if (!ok) {
 		ctx.ui.notify(
 			`[plan-mode] No API key for ${slot.provider}/${slot.id} — staying on current model`,
@@ -164,7 +164,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				// Restore the code model
 				if (codeModel) {
-					const restored = await switchToModelSlot(codeModel, ctx);
+					const restored = await switchToModelSlot(codeModel, ctx, pi);
 					if (restored) {
 						ctx.ui.notify(
 							`[plan-mode] Switched back to ${formatModelId(codeModel)}`,
@@ -178,7 +178,7 @@ export default function (pi: ExtensionAPI) {
 				codeModel = modelSlotFromModel(ctx);
 				// Switch to plan model if configured
 				if (planModel) {
-					const switched = await switchToModelSlot(planModel, ctx);
+					const switched = await switchToModelSlot(planModel, ctx, pi);
 					if (switched) {
 						ctx.ui.notify(
 							`[plan-mode] Switched to ${formatModelId(planModel)}`,
@@ -348,7 +348,7 @@ export default function (pi: ExtensionAPI) {
 
 			// If restoring into plan mode, switch to plan model
 			if (active && planModel) {
-				await switchToModelSlot(planModel, ctx);
+				await switchToModelSlot(planModel, ctx, pi);
 			}
 		} catch (err) {
 			console.error("[plan-mode] Failed to restore state:", err);
