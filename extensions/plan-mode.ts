@@ -1,8 +1,9 @@
 /**
  * Plan Mode — read-only planning toggle for pi.
  *
- * `/plan`        toggle plan mode on/off
- * `Ctrl+Shift+P` same toggle (shortcut)
+ * `/plan`              toggle plan mode on/off
+ * `/plan-model`        set which model to use during plan mode
+ * `Ctrl+Shift+P`       same toggle (shortcut)
  *
  * While plan mode is ACTIVE:
  *   - `before_agent_start` appends a planning protocol to the system prompt:
@@ -10,11 +11,14 @@
  *     touched → risks), and make NO changes.
  *   - `tool_call` blocks `edit` and `write` so the agent cannot modify files.
  *     `read` and `bash` (for ls/grep/find/cat) stay available for exploration.
- *   - A status badge ("⊕ plan") is shown and a notify is emitted on toggle.
+ *   - The model switches to the configured plan model (if set).
+ *   - A status badge ("⊕ plan") is shown.
  *
- * While plan mode is INACTIVE: no injection, no blocking, badge cleared.
+ * While plan mode is INACTIVE:
+ *   - No injection, no blocking, badge cleared.
+ *   - The model switches back to the code model that was active before planning.
  *
- * State is persisted per-session via `pi.appendEntry("plan-state", { active })`
+ * State is persisted per-session via `pi.appendEntry("plan-state", { ... })`
  * so it survives `/reload`, `/resume`, and fork; a brand-new session starts OFF.
  *
  * `/plan` is deliberately a pure toggle ("enable or disable and only"). The plan
@@ -68,32 +72,121 @@ const PLAN_SYSTEM_PROMPT = [
 	"# /PLAN MODE",
 ].join("\n");
 
-interface PlanState {
-	active: boolean;
+/** Serialisable reference to a Model (provider + id). */
+interface ModelSlot {
+	provider: string;
+	id: string;
 }
 
+interface PlanState {
+	active: boolean;
+	codeModel?: ModelSlot;
+	planModel?: ModelSlot;
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function modelSlotFromModel(ctx: ExtensionContext): ModelSlot | null {
+	if (!ctx.model) return null;
+	return { provider: ctx.model.provider, id: ctx.model.id };
+}
+
+function modelSlotKey(slot: ModelSlot | null): string | null {
+	return slot ? `${slot.provider}/${slot.id}` : null;
+}
+
+async function switchToModelSlot(slot: ModelSlot | null, ctx: ExtensionContext): Promise<boolean> {
+	if (!slot) return false;
+	const model = ctx.modelRegistry.find(slot.provider, slot.id);
+	if (!model) {
+		ctx.ui.notify(
+			`[plan-mode] Model ${slot.provider}/${slot.id} no longer available`,
+			"warning",
+		);
+		return false;
+	}
+	const ok = await pi.setModel(model);
+	if (!ok) {
+		ctx.ui.notify(
+			`[plan-mode] No API key for ${slot.provider}/${slot.id} — staying on current model`,
+			"error",
+		);
+	}
+	return ok;
+}
+
+// ── Exports ──────────────────────────────────────────────────────────────────
+
 export default function (pi: ExtensionAPI) {
-	// In-memory mode flag. Single source of truth at runtime; persisted via
+	// In-memory state. Single source of truth at runtime; persisted via
 	// appendEntry so reload/resume/fork restore it.
 	let active = false;
+	let codeModel: ModelSlot | null = null;   // model to restore when leaving plan mode
+	let planModel: ModelSlot | null = null;   // model to use during plan mode
 
 	function setStatus(ctx: ExtensionContext) {
 		if (active) {
-			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("warning", "⊕ plan"));
+			const planTag = planModel ? ` [${planModel.id}]` : "";
+			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("warning", `⊕ plan${planTag}`));
 		} else {
 			ctx.ui.setStatus(STATUS_KEY, undefined);
 		}
 	}
 
+	function persistState() {
+		pi.appendEntry(STATE_TYPE, {
+			active,
+			...(codeModel ? { codeModel } : {}),
+			...(planModel ? { planModel } : {}),
+		} satisfies PlanState);
+	}
+
 	function setMode(next: boolean, ctx: ExtensionContext) {
 		if (next === active) return;
 		active = next;
-		pi.appendEntry(STATE_TYPE, { active } satisfies PlanState);
+		persistState();
 		setStatus(ctx);
+	}
+
+	function formatModelId(slot: ModelSlot | null): string {
+		return slot ? `${slot.provider}/${slot.id}` : "<none>";
 	}
 
 	async function toggle(ctx: ExtensionContext) {
 		try {
+			if (active) {
+				// ── Leaving plan mode ──────────────────────────────────────
+				// Snapshot whatever model is active as the plan-model preference
+				// (user may have changed it during planning).
+				const current = modelSlotFromModel(ctx);
+				if (current) {
+					planModel = current;
+				}
+				// Restore the code model
+				if (codeModel) {
+					const restored = await switchToModelSlot(codeModel, ctx);
+					if (restored) {
+						ctx.ui.notify(
+							`[plan-mode] Switched back to ${formatModelId(codeModel)}`,
+							"info",
+						);
+					}
+				}
+			} else {
+				// ── Entering plan mode ─────────────────────────────────────
+				// Save current model as the code model to restore later
+				codeModel = modelSlotFromModel(ctx);
+				// Switch to plan model if configured
+				if (planModel) {
+					const switched = await switchToModelSlot(planModel, ctx);
+					if (switched) {
+						ctx.ui.notify(
+							`[plan-mode] Switched to ${formatModelId(planModel)}`,
+							"info",
+						);
+					}
+				}
+			}
 			setMode(!active, ctx);
 		} catch (err) {
 			console.error("[plan-mode] Failed to toggle:", err);
@@ -113,6 +206,86 @@ export default function (pi: ExtensionAPI) {
 		description: "Toggle plan mode",
 		handler: async (ctx) => {
 			await toggle(ctx);
+		},
+	});
+
+	// -- Configure plan model ------------------------------------------------
+	pi.registerCommand("plan-model", {
+		description: "Set which model to use during plan mode. Usage: /plan-model [provider/model | clear]",
+		handler: async (args, ctx) => {
+			const trimmed = (args ?? "").trim();
+
+			// /plan-model clear → clear the preference
+			if (trimmed === "clear") {
+				planModel = null;
+				persistState();
+				setStatus(ctx);
+				ctx.ui.notify("[plan-mode] Plan model cleared (will use current model)", "info");
+				return;
+			}
+
+			// /plan-model provider/id → set directly
+			if (trimmed && !trimmed.startsWith("/")) {
+				const slashIdx = trimmed.indexOf("/");
+				if (slashIdx === -1 || slashIdx === 0 || slashIdx === trimmed.length - 1) {
+					ctx.ui.notify(
+						"[plan-mode] Usage: /plan-model <provider/modelId> or /plan-model clear",
+						"warning",
+					);
+					return;
+				}
+				const provider = trimmed.slice(0, slashIdx);
+				const id = trimmed.slice(slashIdx + 1);
+				const model = ctx.modelRegistry.find(provider, id);
+				if (!model) {
+					ctx.ui.notify(
+						`[plan-mode] Model "${trimmed}" not found. Use /plan-model with no args to pick from available models.`,
+						"warning",
+					);
+					return;
+				}
+				planModel = { provider, id };
+				persistState();
+				setStatus(ctx);
+				ctx.ui.notify(`[plan-mode] Plan model set to ${formatModelId(planModel)}`, "info");
+				return;
+			}
+
+			// /plan-model (no args) → show a picker of available models
+			const available = ctx.modelRegistry.getAvailable();
+			if (available.length === 0) {
+				ctx.ui.notify("[plan-mode] No models available. Configure one in settings or /login.", "warning");
+				return;
+			}
+
+			// Build a user-friendly list sorted by provider then id
+			available.sort((a, b) => {
+				if (a.provider < b.provider) return -1;
+				if (a.provider > b.provider) return 1;
+				return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+			});
+
+			const labels = available.map(
+				(m) => `${m.provider}/${m.id}`,
+			);
+
+			const choice = await ctx.ui.select("Pick a model for plan mode:", labels, {
+				placeholder: "Filter models...",
+			});
+
+			if (!choice) {
+				ctx.ui.notify("[plan-mode] No model selected — plan model unchanged.", "info");
+				return;
+			}
+
+			const slashIdx = choice.indexOf("/");
+			const chosenProvider = choice.slice(0, slashIdx);
+			const chosenId = choice.slice(slashIdx + 1);
+
+			planModel = { provider: chosenProvider, id: chosenId };
+			persistState();
+			setStatus(ctx);
+			ctx.ui.notify(`[plan-mode] Plan model set to ${formatModelId(planModel)}`, "info");
 		},
 	});
 
@@ -143,34 +316,65 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	// -- Notify on external model changes when plan mode is active -----------
+	pi.on("model_select", async (event, ctx) => {
+		if (!active) return;
+		// If the user manually changed the model during planning, update our
+		// planModel preference so the toggle-back captures the user's override.
+		if (event.model && event.source !== "restore") {
+			planModel = { provider: event.model.provider, id: event.model.id };
+		}
+	});
+
 	// -- Restore persisted state on startup/reload/resume/fork ----------------
 	pi.on("session_start", async (_event, ctx) => {
 		try {
-			active = false; // default for a fresh session
+			active = false;
+			codeModel = null;
+			planModel = null;
 			const entries = ctx.sessionManager.getEntries();
 			for (let i = entries.length - 1; i >= 0; i--) {
 				const e = entries[i] as { type: string; customType?: string; data?: unknown };
 				if (e.type === "custom" && e.customType === STATE_TYPE) {
 					const data = e.data as PlanState | undefined;
-					if (data && typeof data.active === "boolean") {
-						active = data.active;
+					if (data) {
+						if (typeof data.active === "boolean") active = data.active;
+						if (data.codeModel) codeModel = data.codeModel;
+						if (data.planModel) planModel = data.planModel;
 					}
 					break;
 				}
 			}
+
+			// If restoring into plan mode, switch to plan model
+			if (active && planModel) {
+				await switchToModelSlot(planModel, ctx);
+			}
 		} catch (err) {
 			console.error("[plan-mode] Failed to restore state:", err);
 			active = false;
+			codeModel = null;
+			planModel = null;
 		}
 		setStatus(ctx);
 	});
 
 	// -- Keep persisted state fresh on each turn -----------------------------
-	let lastPersisted = false;
+	let lastPersisted: { active: boolean; codeModel: string | null; planModel: string | null } | null = null;
 	pi.on("turn_start", async () => {
-		if (active !== lastPersisted) {
-			pi.appendEntry(STATE_TYPE, { active } satisfies PlanState);
-			lastPersisted = active;
+		const key = {
+			active,
+			codeModel: modelSlotKey(codeModel),
+			planModel: modelSlotKey(planModel),
+		};
+		if (
+			!lastPersisted ||
+			key.active !== lastPersisted.active ||
+			key.codeModel !== lastPersisted.codeModel ||
+			key.planModel !== lastPersisted.planModel
+		) {
+			persistState();
+			lastPersisted = key;
 		}
 	});
 }
