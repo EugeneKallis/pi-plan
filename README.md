@@ -1,15 +1,14 @@
 # pi-plan
 
-Plan mode for [pi](https://pi.dev) — read-only codebase exploration with an interactive open-questions TUI resolver.
+Plan mode for [pi](https://pi.dev) — read-only codebase exploration with interactive question-and-answer flow.
 
 ## Features
 
 - **`/plan`** — Toggle plan mode on/off (`Ctrl+Shift+P` also works)
 - **`/plan-model`** — Set which model to use during plan mode (interactive picker or `provider/modelId`)
 - **Automatic model switching** — Switches to the plan model when entering plan mode and restores the code model when leaving
-- **Read-only enforcement** — Blocks `edit`, `write`, and `bash` while active
-- **Open questions TUI** — When the agent lists open questions in the plan, the extension presents them one at a time with selectable suggested answers (auto-extracted from "X or Y?" patterns, "vs" patterns, indented bullet-point lists, and `(Options: ...)` hints) and a "Type something..." custom input option
-- **Yes/no auto-fallback** — Polar questions (Should/Is/Can/...) automatically get Yes/No options
+- **Read-only enforcement** — Blocks `edit`, `write`, and mutating `bash` while active
+- **One-at-a-time questions** — When the agent needs clarification, it asks one question at a time with numbered options you can copy-paste
 - **Iterative refinement** — Your answers are fed back to the agent so the plan can be refined until all questions are resolved
 - **Persistent state** — Model selections and plan mode state survive `/reload`, `/resume`, and fork
 
@@ -23,22 +22,17 @@ pi install git:github.com/EugeneKallis/pi-plan
 
 1. Run `/plan` to enter plan mode
 2. The agent explores the codebase (read-only) and creates a plan
-3. If the agent has open questions, a TUI appears with suggested answers:
+3. If the agent needs clarification, it asks one question at a time with numbered options:
 
-```
-┌──────────────────────────────────────────────┐
-│  Question 1/2                                 │
-│  Should we use Redis or in-memory cache?      │
-│                                                │
-│  > 1. Redis (for persistence across restarts)  │
-│    2. In-memory cache (simpler, no dep)        │
-│    3. ✏️  Type something...                    │
-│                                                │
-│  ↑↓ navigate • Enter to select • Esc to cancel │
-└──────────────────────────────────────────────┘
-```
+   ```
+   **Question:** Should we use Redis or an in-memory Map for caching?
 
-4. Answer all questions → agent refines the plan with your answers
+   1. Redis — persistent across restarts, production-ready
+   2. In-memory Map — simpler, no dependency
+   3. Type your own
+   ```
+
+4. Type the number or your own answer → agent moves to the next question (if any)
 5. Run `/plan` again to exit plan mode and execute the approved plan
 
 ### Model switching
@@ -64,22 +58,9 @@ When plan mode is on, the status bar shows the active plan model:
 If you change the model manually while planning (via `/model` or `Ctrl+P`),
 the plan-mode preference updates to match your latest choice.
 
-### How the agent should format questions
+### How questions work
 
-The TUI extracts answer options from questions in several ways. The recommended format is:
-
-```markdown
-- Should we use Redis or in-memory caching?
-  - Redis (persistence, production-ready)
-  - In-memory Map (simpler, no dependency)
-```
-
-The parser also handles:
-- **"X or Y" questions** — auto-extracts both sides as options (e.g., "Redis or in-memory cache?" → `Redis`, `In-memory cache`)
-- **"X vs Y" questions** — same treatment
-- **`(Options: ...)` / `(Suggested: ...)` tags** — inline comma-separated lists
-- **Yes/no questions** — auto-generated when the question starts with Should/Is/Can/Will/etc.
-- **Just type** — "✏️ Type something..." is always available as a fallback
+The model asks one question at a time and waits for your answer before moving on. Each question has numbered options you can copy-paste by typing the number or describing your own choice. No TUI widgets — just clean text output you can interact with directly.
 
 ## Development
 
