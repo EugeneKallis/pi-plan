@@ -31,7 +31,9 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key } from "@earendil-works/pi-tui";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { Key, Container, Text, SelectList } from "@earendil-works/pi-tui";
+import type { SelectItem } from "@earendil-works/pi-tui";
 
 const STATE_TYPE = "plan-state";
 const STATUS_KEY = "plan-mode";
@@ -251,7 +253,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// /plan-model (no args) → show a picker of available models
+			// /plan-model (no args) → show a searchable picker of available models
 			const available = ctx.modelRegistry.getAvailable();
 			if (available.length === 0) {
 				ctx.ui.notify("[plan-mode] No models available. Configure one in settings or /login.", "warning");
@@ -265,12 +267,39 @@ export default function (pi: ExtensionAPI) {
 				return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 			});
 
-			const labels = available.map(
-				(m) => `${m.provider}/${m.id}`,
+			const items: SelectItem[] = available.map(
+				(m) => ({
+					value: `${m.provider}/${m.id}`,
+					label: `${m.id}`,
+					description: m.provider,
+				}),
 			);
 
-			const choice = await ctx.ui.select("Pick a model for plan mode:", labels, {
-				placeholder: "Filter models...",
+			const choice = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+				const container = new Container();
+
+				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+				container.addChild(new Text(theme.fg("accent", theme.bold("Pick a model for plan mode")), 1, 0));
+
+				const selectList = new SelectList(items, Math.min(items.length, 10), {
+					selectedPrefix: (t) => theme.fg("accent", t),
+					selectedText: (t) => theme.fg("accent", t),
+					description: (t) => theme.fg("muted", t),
+					scrollInfo: (t) => theme.fg("dim", t),
+					noMatch: (t) => theme.fg("warning", t),
+				});
+				selectList.onSelect = (item) => done(item.value);
+				selectList.onCancel = () => done(null);
+				container.addChild(selectList);
+
+				container.addChild(new Text(theme.fg("dim", "Type to search • ↑↓ navigate • enter select • esc cancel"), 1, 0));
+				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+				return {
+					render: (w) => container.render(w),
+					invalidate: () => container.invalidate(),
+					handleInput: (data) => { selectList.handleInput(data); tui.requestRender(); },
+				};
 			});
 
 			if (!choice) {
