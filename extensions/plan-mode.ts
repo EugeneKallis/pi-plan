@@ -32,8 +32,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
-import { Key, Container, Text, SelectList } from "@earendil-works/pi-tui";
-import type { SelectItem } from "@earendil-works/pi-tui";
+import { Key, Container, Text, Input, Spacer, fuzzyFilter } from "@earendil-works/pi-tui";
 
 const STATE_TYPE = "plan-state";
 const STATUS_KEY = "plan-mode";
@@ -281,38 +280,127 @@ export default function (pi: ExtensionAPI) {
 				return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 			});
 
-			const items: SelectItem[] = available.map(
-				(m) => ({
-					value: `${m.provider}/${m.id}`,
-					label: `${m.id}`,
-					description: m.provider,
-				}),
-			);
+			const choice = await ctx.ui.custom<string | null>((tui, theme, kb, done) => {
+				const root = new Container();
 
-			const choice = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-				const container = new Container();
+				root.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+				root.addChild(new Spacer(1));
+				root.addChild(new Text(theme.fg("accent", theme.bold("Pick a model for plan mode")), 1, 0));
+				root.addChild(new Spacer(1));
 
-				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-				container.addChild(new Text(theme.fg("accent", theme.bold("Pick a model for plan mode")), 1, 0));
+				// Search input
+				const search = new Input();
+				search.onSubmit = () => {
+					// Enter on search input selects the first filtered item
+					if (filtered[selectedIndex]) {
+						done(`${filtered[selectedIndex].provider}/${filtered[selectedIndex].id}`);
+					}
+				};
+				root.addChild(search);
+				root.addChild(new Spacer(1));
 
-				const selectList = new SelectList(items, Math.min(items.length, 10), {
-					selectedPrefix: (t) => theme.fg("accent", t),
-					selectedText: (t) => theme.fg("accent", t),
-					description: (t) => theme.fg("muted", t),
-					scrollInfo: (t) => theme.fg("dim", t),
-					noMatch: (t) => theme.fg("warning", t),
-				});
-				selectList.onSelect = (item) => done(item.value);
-				selectList.onCancel = () => done(null);
-				container.addChild(selectList);
+				// List container (repopulated on each filter)
+				const listContainer = new Container();
+				root.addChild(listContainer);
+				root.addChild(new Spacer(1));
 
-				container.addChild(new Text(theme.fg("dim", "Type to search • ↑↓ navigate • enter select • esc cancel"), 1, 0));
-				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+				root.addChild(new Text(theme.fg("dim", "Type to search • ↑↓ navigate • enter select • esc cancel"), 1, 0));
+				root.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+				// Filter / selection state
+				let query = "";
+				let selectedIndex = 0;
+				let filtered = available;
+
+				function repaint() {
+					listContainer.clear();
+					const maxVisible = 10;
+					const len = filtered.length;
+					if (len === 0) {
+						listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
+						return;
+					}
+					const startIndex = Math.max(
+						0,
+						Math.min(selectedIndex - Math.floor(maxVisible / 2), len - maxVisible),
+					);
+					const endIndex = Math.min(startIndex + maxVisible, len);
+
+					for (let i = startIndex; i < endIndex; i++) {
+						const m = filtered[i];
+						if (!m) continue;
+						const isSelected = i === selectedIndex;
+						const isCurrent = planModel && planModel.provider === m.provider && planModel.id === m.id;
+						const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
+						if (isSelected) {
+							const line = `${theme.fg("accent", "→ ")}${theme.fg("accent", m.id)} ${theme.fg("muted", `[${m.provider}]`)}${checkmark}`;
+							listContainer.addChild(new Text(line, 0, 0));
+						} else {
+							const line = `  ${m.id} ${theme.fg("muted", `[${m.provider}]`)}${checkmark}`;
+							listContainer.addChild(new Text(line, 0, 0));
+						}
+					}
+
+					if (startIndex > 0 || endIndex < len) {
+						listContainer.addChild(new Text(theme.fg("muted", `  (${selectedIndex + 1}/${len})`), 0, 0));
+					}
+
+					// Show model name of selected item for context
+					const selected = filtered[selectedIndex];
+					if (selected) {
+						listContainer.addChild(new Spacer(1));
+						listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.name}`), 0, 0));
+					}
+				}
+
+				function applyFilter() {
+					filtered = query
+						? fuzzyFilter(available, query, (m) => `${m.provider} ${m.id} ${m.name}`)
+						: available;
+					selectedIndex = Math.min(selectedIndex, Math.max(0, filtered.length - 1));
+					repaint();
+				}
+
+				// Initial paint
+				repaint();
 
 				return {
-					render: (w) => container.render(w),
-					invalidate: () => container.invalidate(),
-					handleInput: (data) => { selectList.handleInput(data); tui.requestRender(); },
+					render: (w) => root.render(w),
+					invalidate: () => root.invalidate(),
+					handleInput: (data) => {
+						// Up — wrap to bottom at top
+						if (kb.matches(data, "tui.select.up")) {
+							if (filtered.length === 0) return;
+							selectedIndex = selectedIndex === 0 ? filtered.length - 1 : selectedIndex - 1;
+							repaint();
+							tui.requestRender();
+							return;
+						}
+						// Down — wrap to top at bottom
+						if (kb.matches(data, "tui.select.down")) {
+							if (filtered.length === 0) return;
+							selectedIndex = selectedIndex === filtered.length - 1 ? 0 : selectedIndex + 1;
+							repaint();
+							tui.requestRender();
+							return;
+						}
+						// Enter — select
+						if (kb.matches(data, "tui.select.confirm")) {
+							const m = filtered[selectedIndex];
+							if (m) done(`${m.provider}/${m.id}`);
+							return;
+						}
+						// Esc / Ctrl+C — cancel
+						if (kb.matches(data, "tui.select.cancel")) {
+							done(null);
+							return;
+						}
+						// Everything else → search input
+						search.handleInput(data);
+						query = search.getValue();
+						applyFilter();
+						tui.requestRender();
+					},
 				};
 			});
 
